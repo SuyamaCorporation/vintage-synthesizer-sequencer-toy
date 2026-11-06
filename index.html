@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ヴィンテージシンセシーケンサー</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background: #1a1008; font-family: 'Courier New', monospace; }
+  .led { width: 10px; height: 10px; border-radius: 50%; background: #222; transition: background 0.05s; }
+  .led.on { background: #00ff88; box-shadow: 0 0 6px #00ff88; }
+  .led.active { background: #ffaa00; box-shadow: 0 0 8px #ffaa00; }
+  .step-btn {
+    width: 100%; aspect-ratio: 1;
+    border-radius: 4px;
+    border: 1px solid #333;
+    background: #111;
+    cursor: pointer;
+    transition: all 0.05s;
+  }
+  .step-btn.on { background: #00cc66; border-color: #00ff88; box-shadow: 0 0 5px #00ff8855; }
+  .step-btn.playing { background: #ffaa00 !important; border-color: #ffcc44 !important; box-shadow: 0 0 8px #ffaa00 !important; }
+  .knob-label { font-size: 9px; color: #888; text-align: center; }
+  .panel-bg { background: #2a1a08; border: 1px solid #443322; border-radius: 8px; }
+  @keyframes blink { 0%,49%{opacity:1} 50%,100%{opacity:0.3} }
+  .blink { animation: blink 1s linear infinite; }
+  input[type=range] { accent-color: #00cc66; }
+  select { background: #111; color: #aaa; border: 1px solid #444; border-radius: 4px; padding: 2px 4px; }
+</style>
+</head>
+<body class="text-green-400 min-h-screen">
+<div class="max-w-2xl mx-auto p-3">
+  <header class="text-center py-3">
+    <h1 class="text-xl font-bold tracking-widest" style="color:#ffaa00; text-shadow: 0 0 10px #ffaa0066">
+      ◈ VINTAGE SYNTH SEQUENCER ◈
+    </h1>
+    <p class="text-xs text-yellow-900 mt-0.5">16-STEP × 8-CHANNEL TONE SEQUENCER</p>
+  </header>
+
+  <!-- Transport controls -->
+  <div class="panel-bg p-3 mb-3 flex items-center gap-4 flex-wrap">
+    <button id="play-btn" onclick="togglePlay()"
+      class="px-5 py-2 rounded font-bold text-sm border border-green-700 bg-green-900 hover:bg-green-800 text-green-400"
+      aria-label="再生・停止">
+      ▶ PLAY
+    </button>
+    <div>
+      <label class="text-xs text-yellow-700 block" for="bpm-slider">BPM</label>
+      <div class="flex items-center gap-2">
+        <input id="bpm-slider" type="range" min="60" max="180" value="120" class="w-24" oninput="updateBpm(this.value)" aria-label="BPM設定">
+        <span id="bpm-display" class="text-sm font-bold" style="color:#ffaa00">120</span>
+      </div>
+    </div>
+    <div>
+      <label class="text-xs text-yellow-700 block" for="wave-select">波形</label>
+      <select id="wave-select" onchange="updateWave(this.value)" aria-label="波形選択">
+        <option value="sine">SINE</option>
+        <option value="square" selected>SQUARE</option>
+        <option value="sawtooth">SAW</option>
+        <option value="triangle">TRI</option>
+      </select>
+    </div>
+    <div>
+      <label class="text-xs text-yellow-700 block" for="reverb-toggle">REVERB</label>
+      <button id="reverb-toggle" onclick="toggleReverb()"
+        class="px-3 py-1 rounded text-xs border font-bold border-blue-700 bg-gray-900 text-gray-500"
+        aria-label="リバーブのオン/オフ" aria-pressed="false">OFF</button>
+    </div>
+    <div class="ml-auto text-xs text-yellow-900">
+      STEP: <span id="step-indicator" class="font-bold" style="color:#ffaa00">-</span>
+    </div>
+  </div>
+
+  <!-- Save slots -->
+  <div class="panel-bg p-2 mb-3 flex items-center gap-2 flex-wrap">
+    <span class="text-xs text-yellow-700">PATTERN:</span>
+    <div id="save-slots" class="flex gap-1"></div>
+    <button onclick="savePattern()" class="px-2 py-1 text-xs border border-yellow-700 text-yellow-700 rounded hover:bg-yellow-900" aria-label="現在のパターンを保存">SAVE</button>
+    <button onclick="clearAll()" class="px-2 py-1 text-xs border border-red-900 text-red-700 rounded hover:bg-red-950" aria-label="全クリア">CLR</button>
+    <button onclick="loadPreset()" class="px-2 py-1 text-xs border border-green-800 text-green-700 rounded hover:bg-green-950" aria-label="プリセット読み込み">PRESET</button>
+  </div>
+
+  <!-- Sequencer grid -->
+  <div class="panel-bg p-3 mb-3">
+    <!-- Step numbers -->
+    <div class="grid grid-cols-16 gap-1 mb-1" style="grid-template-columns: repeat(16, 1fr)">
+      <div id="step-headers" class="contents"></div>
+    </div>
+
+    <!-- Rows -->
+    <div id="seq-grid" class="space-y-1"></div>
+  </div>
+
+  <!-- Per-row volumes (channel strips) -->
+  <div class="panel-bg p-3 mb-3">
+    <p class="text-xs text-yellow-700 mb-2">CHANNEL VOLUMES</p>
+    <div id="channel-strips" class="grid grid-cols-8 gap-2"></div>
+  </div>
+</div>
+
+<script>
+const NOTES = ['C5','B4','A4','G4','F4','E4','D4','C4'];
+const FREQS = [523.25, 493.88, 440.00, 392.00, 349.23, 329.63, 293.66, 261.63];
+const STEPS = 16, ROWS = 8;
+
+let grid = Array.from({length:ROWS}, () => Array(STEPS).fill(false));
+let volumes = Array(ROWS).fill(0.5);
+let isPlaying = false, currentStep = 0, bpm = 120, intervalId = null;
+let waveform = 'square', reverbOn = false;
+let audioCtx = null, reverbNode = null;
+let currentSlot = 0;
+
+function getAudioCtx() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (reverbOn) createReverb();
+  }
+  return audioCtx;
+}
+
+async function createReverb() {
+  if (!audioCtx) return;
+  if (!reverbNode) {
+    const convolver = audioCtx.createConvolver();
+    const bufSize = audioCtx.sampleRate * 2;
+    const buf = audioCtx.createBuffer(2, bufSize, audioCtx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const data = buf.getChannelData(ch);
+      for (let i = 0; i < bufSize; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufSize, 2);
+    }
+    convolver.buffer = buf;
+    reverbNode = convolver;
+  }
+}
+
+function playNote(row) {
+  const ctx = getAudioCtx();
+  const freq = FREQS[row];
+  const vol = volumes[row];
+  const now = ctx.currentTime;
+
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = waveform;
+  osc.frequency.setValueAtTime(freq, now);
+  gain.gain.setValueAtTime(vol * 0.3, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+
+  if (reverbOn && reverbNode) {
+    osc.connect(gain);
+    gain.connect(reverbNode);
+    reverbNode.connect(ctx.destination);
+  } else {
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+  }
+
+  osc.start(now);
+  osc.stop(now + 0.3);
+}
+
+function tick() {
+  // Clear previous step highlight
+  for (let r = 0; r < ROWS; r++) {
+    const btn = document.getElementById('btn-' + r + '-' + currentStep);
+    if (btn) btn.classList.remove('playing');
+  }
+
+  currentStep = (currentStep + 1) % STEPS;
+  document.getElementById('step-indicator').textContent = currentStep + 1;
+
+  for (let r = 0; r < ROWS; r++) {
+    const btn = document.getElementById('btn-' + r + '-' + currentStep);
+    if (btn) btn.classList.add('playing');
+    if (grid[r][currentStep]) playNote(r);
+  }
+}
+
+function togglePlay() {
+  isPlaying = !isPlaying;
+  const btn = document.getElementById('play-btn');
+  if (isPlaying) {
+    getAudioCtx();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    if (reverbOn) createReverb();
+    intervalId = setInterval(tick, 60000 / bpm / 4);
+    btn.textContent = '⏹ STOP';
+    btn.classList.remove('bg-green-900'); btn.classList.add('bg-red-900','border-red-700','text-red-400');
+  } else {
+    clearInterval(intervalId);
+    for (let r = 0; r < ROWS; r++) {
+      const btn2 = document.getElementById('btn-' + r + '-' + currentStep);
+      if (btn2) btn2.classList.remove('playing');
+    }
+    btn.textContent = '▶ PLAY';
+    btn.classList.add('bg-green-900'); btn.classList.remove('bg-red-900','border-red-700','text-red-400');
+    document.getElementById('step-indicator').textContent = '-';
+  }
+}
+
+function updateBpm(val) {
+  bpm = parseInt(val);
+  document.getElementById('bpm-display').textContent = bpm;
+  if (isPlaying) { clearInterval(intervalId); intervalId = setInterval(tick, 60000 / bpm / 4); }
+}
+
+function updateWave(val) { waveform = val; }
+
+function toggleReverb() {
+  reverbOn = !reverbOn;
+  const btn = document.getElementById('reverb-toggle');
+  if (reverbOn) {
+    btn.textContent = 'ON'; btn.classList.add('text-blue-400','border-blue-400'); btn.classList.remove('text-gray-500');
+    btn.setAttribute('aria-pressed', 'true');
+    if (audioCtx) createReverb();
+  } else {
+    btn.textContent = 'OFF'; btn.classList.remove('text-blue-400','border-blue-400'); btn.classList.add('text-gray-500');
+    btn.setAttribute('aria-pressed', 'false');
+  }
+}
+
+function buildGrid() {
+  // Step headers
+  const headers = document.getElementById('step-headers');
+  headers.innerHTML = '';
+  for (let s = 0; s < STEPS; s++) {
+    const d = document.createElement('div');
+    d.className = 'text-center text-xs';
+    d.style.color = s % 4 === 0 ? '#ffaa00' : '#444';
+    d.textContent = s % 4 === 0 ? (s/4+1) : '·';
+    headers.appendChild(d);
+  }
+
+  const seqGrid = document.getElementById('seq-grid');
+  seqGrid.innerHTML = '';
+
+  for (let r = 0; r < ROWS; r++) {
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-1';
+
+    const noteLabel = document.createElement('div');
+    noteLabel.className = 'text-xs font-bold w-6 shrink-0 text-right';
+    noteLabel.style.color = '#888';
+    noteLabel.textContent = NOTES[r];
+    row.appendChild(noteLabel);
+
+    const stepsContainer = document.createElement('div');
+    stepsContainer.className = 'grid gap-1 flex-1';
+    stepsContainer.style.gridTemplateColumns = 'repeat(16,1fr)';
+
+    for (let s = 0; s < STEPS; s++) {
+      const btn = document.createElement('button');
+      btn.id = 'btn-' + r + '-' + s;
+      btn.className = 'step-btn' + (grid[r][s] ? ' on' : '');
+      btn.setAttribute('aria-label', NOTES[r] + ' ステップ ' + (s+1));
+      btn.setAttribute('aria-pressed', grid[r][s] ? 'true' : 'false');
+      btn.onclick = () => toggleStep(r, s, btn);
+      stepsContainer.appendChild(btn);
+    }
+    row.appendChild(stepsContainer);
+    seqGrid.appendChild(row);
+  }
+
+  // Channel strips
+  const strips = document.getElementById('channel-strips');
+  strips.innerHTML = '';
+  for (let r = 0; r < ROWS; r++) {
+    const strip = document.createElement('div');
+    strip.className = 'text-center';
+    const lbl = document.createElement('div'); lbl.className = 'knob-label'; lbl.textContent = NOTES[r];
+    const slider = document.createElement('input');
+    slider.type = 'range'; slider.min = '0'; slider.max = '1'; slider.step = '0.05';
+    slider.value = volumes[r]; slider.className = 'w-full';
+    slider.style.writingMode = 'vertical-lr';
+    slider.style.height = '60px'; slider.style.width = '20px'; slider.style.margin = '0 auto';
+    slider.setAttribute('aria-label', NOTES[r] + 'チャンネル音量');
+    const rowIdx = r;
+    slider.oninput = e => { volumes[rowIdx] = parseFloat(e.target.value); };
+    strip.appendChild(lbl); strip.appendChild(slider);
+    strips.appendChild(strip);
+  }
+
+  // Save slots
+  const slotsContainer = document.getElementById('save-slots');
+  slotsContainer.innerHTML = '';
+  for (let i = 0; i < 5; i++) {
+    const btn = document.createElement('button');
+    btn.textContent = i + 1;
+    btn.className = 'px-2 py-1 text-xs rounded border ' + (i === currentSlot ? 'border-yellow-500 text-yellow-400 bg-yellow-900' : 'border-gray-700 text-gray-500');
+    btn.setAttribute('aria-label', 'パターンスロット ' + (i+1));
+    btn.onclick = () => { currentSlot = i; buildGrid(); loadPattern(); };
+    slotsContainer.appendChild(btn);
+  }
+}
+
+function toggleStep(r, s, btn) {
+  grid[r][s] = !grid[r][s];
+  btn.classList.toggle('on', grid[r][s]);
+  btn.setAttribute('aria-pressed', grid[r][s] ? 'true' : 'false');
+  // Preview note
+  if (grid[r][s]) { getAudioCtx(); if (audioCtx.state === 'suspended') audioCtx.resume(); playNote(r); }
+}
+
+function savePattern() {
+  const data = { grid, volumes };
+  localStorage.setItem('synth-pattern-' + currentSlot, JSON.stringify(data));
+  buildGrid();
+  const btn = document.querySelectorAll('#save-slots button')[currentSlot];
+  if (btn) { const orig = btn.style.background; btn.style.background='#226622'; setTimeout(()=>btn.style.background=orig,500); }
+}
+
+function loadPattern() {
+  const raw = localStorage.getItem('synth-pattern-' + currentSlot);
+  if (!raw) return;
+  try {
+    const data = JSON.parse(raw);
+    if (data.grid) grid = data.grid;
+    if (data.volumes) volumes = data.volumes;
+    buildGrid();
+  } catch {}
+}
+
+function clearAll() {
+  grid = Array.from({length:ROWS}, () => Array(STEPS).fill(false));
+  buildGrid();
+}
+
+const PRESET = [
+  [1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0],
+  [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0],
+  [0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0],
+  [0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,1],
+  [1,0,0,1,0,0,1,0,0,1,0,0,0,1,0,0],
+  [0,1,0,0,0,1,0,0,0,1,0,0,0,0,1,0],
+  [0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0],
+  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+];
+function loadPreset() {
+  grid = PRESET.map(r => r.map(Boolean));
+  buildGrid();
+}
+
+buildGrid();
+</script>
+</body>
+</html>
